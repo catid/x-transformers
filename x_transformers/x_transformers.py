@@ -1220,7 +1220,10 @@ class AttentionLayers(nn.Module):
             if layer_type == 'a':
                 if low_rank_attn:
                     # Only apply low-rank attention to every other layer, starting on the third one
-                    enable_low_rank_attn = attn_layer_index >= 2 and attn_layer_index % 2 == 0
+                    # Also do not apply this near the end where we prefer to use low-rank FF layers
+                    enable_low_rank_attn = attn_layer_index > 0 and attn_layer_index % 2 == 0
+                    if low_rank_ff and ind >= ((7 * len(self.layer_types)) // 8):
+                        enable_low_rank_attn = False
                 print(f"LAYER {attn_layer_index} enable_low_rank_attn={enable_low_rank_attn}")
                 attn_layer_index += 1
                 layer = Attention(dim, heads = heads, causal = causal, low_rank = enable_low_rank_attn, **attn_kwargs)
