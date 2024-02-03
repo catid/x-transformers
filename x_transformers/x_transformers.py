@@ -645,13 +645,15 @@ class FeedForward(nn.Module):
             project_in = GLU(dim, inner_dim, activation, mult_bias = glu_mult_bias)
         else:
             if low_rank:
-                rank = dim//8
+                rank = dim//4
+                print(f"FeedForward low-rank dim = {dim} -> rank = {rank} -> {inner_dim}")
                 project_in = nn.Sequential(
                     nn.Linear(dim, rank, bias = False),
                     nn.Linear(rank, inner_dim, bias = not no_bias),
                     activation
                 )
             else:
+                print(f"FeedForward full dim = {dim} -> inner_dim = {inner_dim}")
                 project_in = nn.Sequential(
                     nn.Linear(dim, inner_dim, bias = not no_bias),
                     activation
@@ -731,15 +733,6 @@ class Attention(nn.Module):
         v_dim = value_dim_head * kv_heads
         out_dim = value_dim_head * heads
 
-        if low_rank:
-            def next_mult(n, heads):
-                n = max(8, n//2)
-                return ((n + heads - 1) // heads) * heads
-            q_dim = next_mult(dim_head, heads)
-            k_dim = next_mult(dim_head, kv_heads)
-            v_dim = next_mult(value_dim_head, kv_heads)
-            out_dim = next_mult(value_dim_head, heads)
-
         self.to_q = nn.Linear(dim, q_dim, bias = False)
         self.to_k = nn.Linear(dim_kv, k_dim, bias = False)
 
@@ -812,7 +805,20 @@ class Attention(nn.Module):
 
         # attention on attention
         self.attn_on_attn = on_attn
-        self.to_out = nn.Sequential(nn.Linear(out_dim, dim * 2, bias = False), nn.GLU()) if on_attn else nn.Linear(out_dim, dim, bias = False)
+        if low_rank:
+            rank = dim // 4
+            print(f"Low rank={rank} attention to_out out_dim = {out_dim} dim = {dim}")
+            self.to_out = nn.Sequential(
+                nn.Linear(out_dim, rank, bias = False),
+                nn.Linear(rank, dim * 2, bias = False),
+                nn.GLU()
+            ) if on_attn else nn.Sequential(
+                nn.Linear(out_dim, rank, bias = False),
+                nn.Linear(rank, dim, bias = False),
+            )
+        else:
+            print(f"Full-rank attention to_out out_dim = {out_dim} dim = {dim}")
+            self.to_out = nn.Sequential(nn.Linear(out_dim, dim * 2, bias = False), nn.GLU()) if on_attn else nn.Linear(out_dim, dim, bias = False)
 
         # whether to rotate positions into values, for absolute positions in addition to relative
         self.rotary_embed_values = rotary_embed_values
@@ -1057,7 +1063,7 @@ class AttentionLayers(nn.Module):
         cross_attn_tokens_dropout = 0.,
         disable_abs_pos_emb = None,
         low_rank_attn = False,
-        low_rank_mlp = False,
+        low_rank_ff = False,
         **kwargs
     ):
         super().__init__()
@@ -1205,25 +1211,28 @@ class AttentionLayers(nn.Module):
         # iterate and construct layers
 
         enable_low_rank_attn = False
-        enable_low_rank_mlp = False
+        enable_low_rank_ff = False
+        attn_layer_index = 0
 
         for ind, (layer_type, layer_shift_tokens) in enumerate(zip(self.layer_types, shift_tokens)):
             is_last_layer = ind == (len(self.layer_types) - 1)
 
-            if low_rank_attn:
-                # Only apply low-rank attention to every other layer in the middle
-                enable_low_rank_attn = ind >= 2 and ind % 2 == 0 and not is_last_layer
-
-            if low_rank_mlp:
-                # Only apply low-rank MLP to the final 1/3rd of the network
-                enable_low_rank_mlp = ind >= ((2 * len(self.layer_types)) // 3)
-
             if layer_type == 'a':
+                if low_rank_attn:
+                    # Only apply low-rank attention to every other layer, starting on the third one
+                    enable_low_rank_attn = attn_layer_index >= 2 and attn_layer_index % 2 == 0
+                print(f"LAYER {attn_layer_index} enable_low_rank_attn={enable_low_rank_attn}")
+                attn_layer_index += 1
                 layer = Attention(dim, heads = heads, causal = causal, low_rank = enable_low_rank_attn, **attn_kwargs)
             elif layer_type == 'c':
                 layer = Attention(dim, heads = heads, low_rank = enable_low_rank_attn, **{**attn_kwargs, **cross_attn_kwargs})
             elif layer_type == 'f':
-                layer = FeedForward(dim, low_rank = low_rank_mlp, **ff_kwargs)
+                if low_rank_ff:
+                    # Only apply low-rank FF input to the final 1/8th of the network
+                    enable_low_rank_ff = ind >= ((7 * len(self.layer_types)) // 8)
+                print(f"LAYER {ind} enable_low_rank_ff={enable_low_rank_ff}")
+
+                layer = FeedForward(dim, low_rank = enable_low_rank_ff, **ff_kwargs)
                 layer = layer if not macaron else Scale(0.5, layer)
             else:
                 raise Exception(f'invalid layer type {layer_type}')
