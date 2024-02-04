@@ -662,6 +662,27 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.ff(x)
 
+class AutoEncoder(nn.Module):
+    def __init__(
+        self,
+        dim,
+        mult = 4,
+        dropout = 0,
+    ):
+        super().__init__()
+
+        self.net = Sequential(
+            LayerNorm(dim),
+            nn.Linear(dim, dim//4),
+            nn.Linear(dim//4, dim*4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim*4, dim),
+        )
+
+    def forward(self, x):
+        return x + self.net(x)
+
 # attention. it is all we need
 
 class Attention(nn.Module):
@@ -1158,6 +1179,8 @@ class AttentionLayers(nn.Module):
         else:
             layer_types = default_block * depth
 
+        layer_types += ('l',)
+
         self.layer_types = layer_types
         self.layers_execute_order = default(layers_execute_order, tuple(range(len(layer_types))))
 
@@ -1190,6 +1213,8 @@ class AttentionLayers(nn.Module):
                 layer = Attention(dim, heads = heads, causal = causal, **attn_kwargs)
             elif layer_type == 'c':
                 layer = Attention(dim, heads = heads, **{**attn_kwargs, **cross_attn_kwargs})
+            elif layer_type == 'l':
+                layer = AutoEncoder(dim)
             elif layer_type == 'f':
                 layer = FeedForward(dim, **ff_kwargs)
                 layer = layer if not macaron else Scale(0.5, layer)
@@ -1297,6 +1322,7 @@ class AttentionLayers(nn.Module):
         )
 
         layer_variables = tuple(tuple(layer_variable[i] for i in self.layers_execute_order) for layer_variable in layer_variables)
+        layer_mem = None
 
         # go through the attention and feedforward layers
 
@@ -1334,7 +1360,7 @@ class AttentionLayers(nn.Module):
                 out, inter = block(x, mask = mask, context_mask = self_attn_kv_mask, attn_mask = attn_mask, rel_pos = self.rel_pos, rotary_pos_emb = rotary_pos_emb, prev_attn = prev_attn, cache = next(iter_attn_cache, None), mem = layer_mem, mem_mask = layer_mem_mask, return_intermediates = True)
             elif layer_type == 'c':
                 out, inter = block(x, context = context, mask = mask, context_mask = context_mask, prev_attn = prev_cross_attn, cache = next(iter_attn_cache, None), return_intermediates = True)
-            elif layer_type == 'f':
+            elif layer_type == 'f' or layer_type == 'l':
                 out = block(x)
 
             if self.resi_dual:
